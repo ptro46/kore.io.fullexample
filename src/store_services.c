@@ -26,7 +26,7 @@ int        extract_api_store_id(const char* path) {
         return store_id ;
     }
     tofree = psz ;
-
+    
     char *pToken = NULL ;
     for(int i=0;i<4;i++) {
         pToken = strsep(&psz,"/") ; // 4iem iteration cursor on id ([0-9]+ in /api/store/[0-9]+$
@@ -111,15 +111,20 @@ int        post_store(struct http_request *req) {
     kore_json_init(&json, req->http_body->data, req->http_body->length);
     json_created = kore_json_create_object(NULL, NULL);
 
+    // init pgsql struct
     kore_pgsql_init(&sql);
     if ( kore_pgsql_setup(&sql, "db", KORE_PGSQL_SYNC) ) {
+        // parse json
         if ( kore_json_parse(&json)) {
+            // build struct bo_store ( business_objects.h) from json struct
             if ( json_to_bo_store(&json, &o_bo_store, &errors) ) {
+                // execute query with parameters
                 if ( kore_pgsql_query_params(&sql, "insert into magasin(nom) values($1) returning idt,nom",0, nParams, o_bo_store.name, 0, 0) ) {
-                    // execute pg cursor
+                    // execute pg cursor to get one row
                     if ( for_one_tuple(&sql, &bo_store, bo_store_tuple_copy_one_tuple) ) {
                         // convert struct to json
                         if ( bo_store_to_kore_json(&bo_store, json_created, &errors) ) {
+                            // all is ok, fill buf returned with bo_store as json
                             req->status = HTTP_STATUS_OK;
                             kore_json_item_tobuf(json_created, &buf);
                         } else {
@@ -143,9 +148,11 @@ int        post_store(struct http_request *req) {
     } else {
         kore_pgsql_logerror(&sql);
     }
-    
-    http_response(req, 200, buf.data, buf.offset);
 
+    // send http response, payload containt bo_store created in json
+    http_response(req, req->status, buf.data, buf.offset);
+
+    // clean
     kore_pgsql_cleanup(&sql);
     kore_buf_cleanup(&errors);
     kore_buf_cleanup(&buf);
@@ -213,7 +220,7 @@ int        put_store(struct http_request *req) {
         kore_pgsql_logerror(&sql);
     }
     
-    http_response(req, 200, buf.data, buf.offset);
+    http_response(req, req->status, buf.data, buf.offset);
 
     kore_pgsql_cleanup(&sql);
     kore_buf_cleanup(&errors);
@@ -240,17 +247,21 @@ int        delete_store(struct http_request *req) {
     kore_buf_init(&errors, 1024);
     json = kore_json_create_object(NULL, NULL);
 
+    // init pgsql struct
     kore_pgsql_init(&sql);
-
+    
+    // extract store_id from url
     int store_id = extract_api_store_id(req->path);
     if ( store_id > 0 ) {
         sprintf(sIdt,"%d",store_id);
         if ( kore_pgsql_setup(&sql, "db", KORE_PGSQL_SYNC) ) {
+            // execute query with parameters
             if ( kore_pgsql_query_params(&sql, "delete from magasin where idt=$1 returning idt,nom",0, nParams, sIdt, 0, 0) ) {
-                // execute pg cursor
+                // execute pg cursor to get one row, if no row delete did nothgin
                 if ( for_one_tuple(&sql, &bo_store, bo_store_tuple_copy_one_tuple) ) {
                     // convert struct to json
                     if ( bo_store_to_kore_json(&bo_store, json, &errors) ) {
+                        // all is ok, fill buf returned with deleted bo_store as json
                         req->status = HTTP_STATUS_OK;
                         kore_json_item_tobuf(json, &buf);
                     } else {
@@ -270,8 +281,10 @@ int        delete_store(struct http_request *req) {
         kore_buf_appendf(&buf, "store_id must be > 0\n");
     }
 
+    // send http response, payload containt bo_store created in json
     http_response(req, req->status, buf.data, buf.offset);
 
+    // clean
     kore_pgsql_cleanup(&sql);
     kore_buf_cleanup(&buf);
     kore_buf_cleanup(&errors);
@@ -296,17 +309,21 @@ int        get_store(struct http_request *req) {
     kore_buf_init(&errors, 1024);
     json = kore_json_create_object(NULL, NULL);
 
+    // init pgsql struct
     kore_pgsql_init(&sql);
 
+    // extract store_id from url
     int store_id = extract_api_store_id(req->path);
     if ( store_id > 0 ) {
         sprintf(sIdt,"%d",store_id);
         if ( kore_pgsql_setup(&sql, "db", KORE_PGSQL_SYNC) ) {
+            // execute query with parameters
             if ( kore_pgsql_query_params(&sql, "SELECT idt,nom FROM magasin where idt=$1",0, nParams, sIdt, 0, 0) ) {
-                // execute pg cursor
+                // execute pg cursor to get one row, if no row store_id is not valid
                 if ( for_one_tuple(&sql, &bo_store, bo_store_tuple_copy_one_tuple) ) {
                     // convert struct to json
                     if ( bo_store_to_kore_json(&bo_store, json, &errors) ) {
+                        // all is ok, fill buf returned with deleted bo_store as json
                         req->status = HTTP_STATUS_OK;
                         kore_json_item_tobuf(json, &buf);
                     } else {
@@ -326,8 +343,10 @@ int        get_store(struct http_request *req) {
         kore_buf_appendf(&buf, "store_id must be > 0\n");
     }
 
+    // send http response, payload containt bo_store created in json
     http_response(req, req->status, buf.data, buf.offset);
 
+    // clean
     kore_pgsql_cleanup(&sql);
     kore_buf_cleanup(&buf);
     kore_buf_cleanup(&errors);
@@ -353,12 +372,16 @@ int        store_isles_list(struct http_request *req) {
     json = kore_json_create_object(NULL, NULL);
     kore_pgsql_init(&sql);
 
+    // extract store_id from url
     int store_id = extract_api_store_id(req->path);
     if ( store_id > 0 ) {
         sprintf(sIdt,"%d",store_id);
         if ( kore_pgsql_setup(&sql, "db", KORE_PGSQL_SYNC) ) {
+            // execute query with parameters
             if ( kore_pgsql_query_params(&sql, "SELECT idt,idt_magasin,nom,nom_image FROM rayon where idt_magasin=$1",0, nParams, sIdt, 0, 0) ) {
-                // execute pg cursor, alloc array of stores with callbac bo_store_array_allocator, append datas to array with callback bo_store_tuple_copy
+                // execute pg cursor to get all rows
+                // alloc array of stores with callback bo_isle_array_allocator (db_functions.[hc])
+                // append datas to array with callback bo_isle_tuple_copy_from_array (db_functions.[hc])
                 for_each_tuples(&sql,
                                 (void**)&array_of_isles,
                                 &count_array_of_isles,
@@ -367,12 +390,14 @@ int        store_isles_list(struct http_request *req) {
 
                 // convert struct to json
                 if ( array_bo_isle_to_kore_json(&array_of_isles, count_array_of_isles, json, &errors) ) {
+                    // all is ok, fill buf returned with array of bo_isle
                     req->status = HTTP_STATUS_OK;
                     kore_json_item_tobuf(json, &buf);
                 } else {
                     kore_buf_append(&buf, errors.data, errors.offset) ;
                 }
-    
+
+                // free array of isles allocated by bo_isle_array_allocator callback in for_each_tuples
                 free(array_of_isles);
                 printf("call store_isles_list by url /api/store/[0-9]isle \n");
             } else {
@@ -384,8 +409,12 @@ int        store_isles_list(struct http_request *req) {
     } else {
         kore_buf_appendf(&buf, "store_id must be > 0\n");
     }
+
+    
+    // send http response, payload containt bo_store created in json
     http_response(req, req->status, buf.data, buf.offset);
 
+    // clean
     kore_pgsql_cleanup(&sql);
     kore_buf_cleanup(&buf);
     kore_buf_cleanup(&errors);

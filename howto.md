@@ -1,3 +1,344 @@
+# Create project
+kodev create magasin-rest
+
+# Step per Step
+
+## routing
+
+```bash
+    # create one store with payload {"idt": 0, "name": "Store1"}
+    route ^/api/store$ {
+        handler post_store
+        methods post
+    }
+
+    # delete one store, uri contains store_id 
+    route ^/api/store/[0-9]+$ {
+        handler delete_store
+        methods delete
+    }
+
+    # get one store, uri contains store_id 
+    route ^/api/store/[0-9]+$ {
+        handler get_store
+    }
+
+    # get isles from one store, uri contains store_id 
+    route ^/api/store/[0-9]+/isles$ {
+        handler store_isles_list
+    }
+```
+
+## handlers
+
+### post_store
+
+```c
+int        post_store(struct http_request *req) {
+    struct kore_pgsql        sql;
+    struct kore_buf          buf;
+    struct kore_buf          errors;
+    struct kore_json         json;
+    struct kore_json_item*   json_created;
+    s_bo_store               o_bo_store;
+    s_bo_store               bo_store;
+    int                      nParams=1;
+
+    req->status = HTTP_STATUS_INTERNAL_ERROR;
+
+    kore_buf_init(&buf, 512);
+    kore_buf_init(&errors, 512);
+    kore_json_init(&json, req->http_body->data, req->http_body->length);
+    json_created = kore_json_create_object(NULL, NULL);
+
+    // init pgsql struct
+    kore_pgsql_init(&sql);
+    if ( kore_pgsql_setup(&sql, "db", KORE_PGSQL_SYNC) ) {
+        // parse json
+        if ( kore_json_parse(&json)) {
+            // build struct bo_store ( business_objects.h) from json struct
+            if ( json_to_bo_store(&json, &o_bo_store, &errors) ) {
+                // execute query with parameters
+                if ( kore_pgsql_query_params(&sql, "insert into magasin(nom) values($1) returning idt,nom",0, nParams, o_bo_store.name, 0, 0) ) {
+                    // execute pg cursor to get one row
+                    if ( for_one_tuple(&sql, &bo_store, bo_store_tuple_copy_one_tuple) ) {
+                        // convert struct to json
+                        if ( bo_store_to_kore_json(&bo_store, json_created, &errors) ) {
+                            // all is ok, fill buf returned with bo_store as json
+                            req->status = HTTP_STATUS_OK;
+                            kore_json_item_tobuf(json_created, &buf);
+                        } else {
+                            kore_buf_append(&buf, errors.data, errors.offset) ;
+                        }
+                    } else {
+                        kore_buf_appendf(&buf, "no data return\n");
+                    }
+
+                    printf("call post_store by url /api/store %s\n",buf.data);
+                } else {
+                    kore_pgsql_logerror(&sql);
+                }
+            } else {
+                kore_buf_appendf(&buf, "post /api/store error while unmarshalling json : ");
+                kore_buf_append(&buf, errors.data, errors.offset);
+            }
+        } else {
+            kore_buf_appendf(&buf, "post /api/store error : %s\n", kore_json_strerror());
+        }
+    } else {
+        kore_pgsql_logerror(&sql);
+    }
+
+    // send http response, payload containt bo_store created in json
+    http_response(req, req->status, buf.data, buf.offset);
+
+    // clean
+    kore_pgsql_cleanup(&sql);
+    kore_buf_cleanup(&errors);
+    kore_buf_cleanup(&buf);
+    kore_json_cleanup(&json);
+    kore_json_item_free(json_created);
+
+    return  KORE_RESULT_OK;
+}
+```
+
+### delete_store
+
+```c
+int        delete_store(struct http_request *req) {
+    struct kore_pgsql        sql;
+    s_bo_store               bo_store;
+    struct kore_json_item*   json;
+    struct kore_buf          buf;
+    struct kore_buf          errors;
+    int                      nParams=1;
+    char                     sIdt[14];
+
+    req->status = HTTP_STATUS_INTERNAL_ERROR;
+
+    kore_buf_init(&buf, 1024);
+    kore_buf_init(&errors, 1024);
+    json = kore_json_create_object(NULL, NULL);
+
+    // init pgsql struct
+    kore_pgsql_init(&sql);
+    
+    // extract store_id from url
+    int store_id = extract_api_store_id(req->path);
+    if ( store_id > 0 ) {
+        sprintf(sIdt,"%d",store_id);
+        if ( kore_pgsql_setup(&sql, "db", KORE_PGSQL_SYNC) ) {
+            // execute query with parameters
+            if ( kore_pgsql_query_params(&sql, "delete from magasin where idt=$1 returning idt,nom",0, nParams, sIdt, 0, 0) ) {
+                // execute pg cursor to get one row, if no row delete did nothgin
+                if ( for_one_tuple(&sql, &bo_store, bo_store_tuple_copy_one_tuple) ) {
+                    // convert struct to json
+                    if ( bo_store_to_kore_json(&bo_store, json, &errors) ) {
+                        // all is ok, fill buf returned with deleted bo_store as json
+                        req->status = HTTP_STATUS_OK;
+                        kore_json_item_tobuf(json, &buf);
+                    } else {
+                        kore_buf_append(&buf, errors.data, errors.offset) ;
+                    }
+                } else {
+                    kore_buf_appendf(&buf, "no data return\n");
+                }
+                printf("call delete_store by url /api/store/[0-9]+ (%s) with id %d\n",req->path,store_id);
+            } else {
+                kore_pgsql_logerror(&sql);
+            }
+        } else {
+            kore_pgsql_logerror(&sql);
+        }
+    } else {
+        kore_buf_appendf(&buf, "store_id must be > 0\n");
+    }
+
+    // send http response, payload containt bo_store created in json
+    http_response(req, req->status, buf.data, buf.offset);
+
+    // clean
+    kore_pgsql_cleanup(&sql);
+    kore_buf_cleanup(&buf);
+    kore_buf_cleanup(&errors);
+    kore_json_item_free(json);
+
+    return KORE_RESULT_OK;
+}
+```
+
+### get_store
+
+```c
+int        get_store(struct http_request *req) {
+    struct kore_pgsql        sql;
+    s_bo_store               bo_store;
+    struct kore_json_item*   json;
+    struct kore_buf          buf;
+    struct kore_buf          errors;
+    int                      nParams=1;
+    char                     sIdt[14];
+
+    req->status = HTTP_STATUS_INTERNAL_ERROR;
+
+    kore_buf_init(&buf, 1024);
+    kore_buf_init(&errors, 1024);
+    json = kore_json_create_object(NULL, NULL);
+
+    // init pgsql struct
+    kore_pgsql_init(&sql);
+
+    // extract store_id from url
+    int store_id = extract_api_store_id(req->path);
+    if ( store_id > 0 ) {
+        sprintf(sIdt,"%d",store_id);
+        if ( kore_pgsql_setup(&sql, "db", KORE_PGSQL_SYNC) ) {
+            // execute query with parameters
+            if ( kore_pgsql_query_params(&sql, "SELECT idt,nom FROM magasin where idt=$1",0, nParams, sIdt, 0, 0) ) {
+                // execute pg cursor to get one row, if no row store_id is not valid
+                if ( for_one_tuple(&sql, &bo_store, bo_store_tuple_copy_one_tuple) ) {
+                    // convert struct to json
+                    if ( bo_store_to_kore_json(&bo_store, json, &errors) ) {
+                        // all is ok, fill buf returned with deleted bo_store as json
+                        req->status = HTTP_STATUS_OK;
+                        kore_json_item_tobuf(json, &buf);
+                    } else {
+                        kore_buf_append(&buf, errors.data, errors.offset) ;
+                    }
+                } else {
+                    kore_buf_appendf(&buf, "no data return\n");
+                }
+                printf("call get_store by url /api/store/[0-9]+ (%s) with id %d\n",req->path,store_id);
+            } else {
+                kore_pgsql_logerror(&sql);
+            }
+        } else {
+            kore_pgsql_logerror(&sql);
+        }
+    } else {
+        kore_buf_appendf(&buf, "store_id must be > 0\n");
+    }
+
+    // send http response, payload containt bo_store created in json
+    http_response(req, req->status, buf.data, buf.offset);
+
+    // clean
+    kore_pgsql_cleanup(&sql);
+    kore_buf_cleanup(&buf);
+    kore_buf_cleanup(&errors);
+    kore_json_item_free(json);
+
+    return KORE_RESULT_OK;
+}
+```
+
+### store_isles_list
+
+```c
+int        store_isles_list(struct http_request *req) {
+    struct kore_pgsql        sql;
+    s_bo_isle*               array_of_isles;
+    long                     count_array_of_isles;
+    struct kore_json_item*   json;
+    struct kore_buf          buf;
+    struct kore_buf          errors;
+    int                      nParams=1;
+    char                     sIdt[14];
+    
+    req->status = HTTP_STATUS_INTERNAL_ERROR;
+
+    kore_buf_init(&buf, 1024);
+    kore_buf_init(&errors, 1024);
+    json = kore_json_create_object(NULL, NULL);
+    kore_pgsql_init(&sql);
+
+    // extract store_id from url
+    int store_id = extract_api_store_id(req->path);
+    if ( store_id > 0 ) {
+        sprintf(sIdt,"%d",store_id);
+        if ( kore_pgsql_setup(&sql, "db", KORE_PGSQL_SYNC) ) {
+            // execute query with parameters
+            if ( kore_pgsql_query_params(&sql, "SELECT idt,idt_magasin,nom,nom_image FROM rayon where idt_magasin=$1",0, nParams, sIdt, 0, 0) ) {
+                // execute pg cursor to get all rows
+                // alloc array of stores with callback bo_isle_array_allocator (db_functions.[hc])
+                // append datas to array with callback bo_isle_tuple_copy_from_array (db_functions.[hc])
+                for_each_tuples(&sql,
+                                (void**)&array_of_isles,
+                                &count_array_of_isles,
+                                bo_isle_array_allocator,
+                                bo_isle_tuple_copy_from_array);
+
+                // convert struct to json
+                if ( array_bo_isle_to_kore_json(&array_of_isles, count_array_of_isles, json, &errors) ) {
+                    // all is ok, fill buf returned with array of bo_isle
+                    req->status = HTTP_STATUS_OK;
+                    kore_json_item_tobuf(json, &buf);
+                } else {
+                    kore_buf_append(&buf, errors.data, errors.offset) ;
+                }
+
+                // free array of isles allocated by bo_isle_array_allocator callback in for_each_tuples
+                free(array_of_isles);
+                printf("call store_isles_list by url /api/store/[0-9]isle \n");
+            } else {
+                kore_pgsql_logerror(&sql);
+            }
+        } else {
+            kore_pgsql_logerror(&sql);
+        }
+    } else {
+        kore_buf_appendf(&buf, "store_id must be > 0\n");
+    }
+
+    
+    // send http response, payload containt bo_store created in json
+    http_response(req, req->status, buf.data, buf.offset);
+
+    // clean
+    kore_pgsql_cleanup(&sql);
+    kore_buf_cleanup(&buf);
+    kore_buf_cleanup(&errors);
+    kore_json_item_free(json);
+
+    return KORE_RESULT_OK;
+}
+```
+
+# postgresql
+
+## init
+
+### linux particularity
+
+It is necessary to start by authorizing the syscall getdents getdents64 by a global call.
+
+
+```C
+#include <kore/kore.h>
+#include <kore/http.h>
+#include <kore/pgsql.h>
+#include <kore/seccomp.h>
+
+int		init(int);
+int		page(struct http_request *);
+
+KORE_SECCOMP_FILTER("app",KORE_SYSCALL_ALLOW(getdents),KORE_SYSCALL_ALLOW(getdents64))
+
+int		init(int state) {
+	int ret ;
+	
+	ret = kore_pgsql_register("db","user=kore password=korepwd dbname=magasin host=10.1.1.24 sslmode=disable");
+	if ( ret == KORE_RESULT_OK ) {
+		printf("database postgres db is register\n");
+	} else {
+		printf("database postgres db is not register\n");
+	}
+	return ret;
+}
+```
+
+
 # tests
 
 ## store
@@ -293,351 +634,5 @@ content-length: 28
 #### backend outputs
 ```bash
 call delete_store by url /api/store/[0-9]+ (/api/store/9) with id 9
-```
-
-# Create project
-kodev create magasin-rest
-
-# gestion du cas avec un parametre dans l'url (int)
-exemples
-```bash
-curl -i -k -X GET  https://127.0.0.1:8888/api/store/1234
-curl -i -k -X GET  https://127.0.0.1:8888/api/store/1234/isle
-```
-
-## il faut commencer par parametrer les routes
-```bash
-	route ^/api/store/[0-9]+$ {
-		handler get_store
-	}
-
-	route ^/api/store/[0-9]+/isle$ {
-		handler store_isles_list
-	}
-```
-
-## ensuite faire une fonction qui va aller chercher l'id dans l'url par strsep (strtok)
-```c
-// extract store_id from url /api/store/[0-9]+$/...
-int		extract_api_store_id(const char* path) {
-	int store_id = -1 ;
-	char *tofree = NULL ;
-	char *psz = strdup(path);
-	if ( NULL == psz ) {
-		return store_id ;
-	}
-	tofree = psz ;
-
-	char *pToken = NULL ;
-	for(int i=0;i<4;i++) {
-		pToken = strsep(&psz,"/") ; // 4iem iteration cursor on id ([0-9]+ in /api/store/[0-9]+$
-		if ( pToken == NULL ) {
-			free(tofree);
-			printf("get_store error : pToken is null for %d iteratio\n",i);
-			return store_id ;
-		}
-	}
-	store_id = atoi(pToken);
-	free(tofree);
-	return store_id ;
-}
-```
-
-## l'utilisation dans la fonction handler
-```c
-// /api/store/[0-9]+$ with [0-9]+ : (magasin_id)
-int		get_store(struct http_request *req) {
-	req->status = HTTP_STATUS_INTERNAL_ERROR;
-
-	int store_id = extract_api_store_id(req->path);
-	if ( store_id <= 0 ) {
-		goto out;
-	}
-	
-	printf("call get_store by url /api/store/[0-9]+ (%s) with id %d\n",req->path,store_id);
-	
-	req->status = HTTP_STATUS_OK;
-
-out:
-	http_response(req, req->status, NULL, 0);
-
-	return (KORE_RESULT_OK);
-}
-```
-
-## exemple d'appel
-
-```bash
-call get_store by url /api/store/[0-9]+ (/api/store/1234) with id 1234
-call store_isles_list by url /api/store/[0-9]+/isle (/api/store/1234/isle) with id 1234
-```
-
-# meme URL avec POST / GET / PUT / DELETE
-
-
-## il faut commencer par parametrer les routes
-```bash
-	route ^/api/store$ {
-		handler stores_list
-		methods get
-	}
-
-	route ^/api/store$ {
-		handler post_store
-		methods post
-	}
-```
-
-## Ensuite coder les fonctions
-```C
-// get /api/store
-int		stores_list(struct http_request *req) {
-	req->status = HTTP_STATUS_INTERNAL_ERROR;
-
-	printf("call stotes_list by url /api/store \n");
-	
-	req->status = HTTP_STATUS_OK;
-
-//out:
-	http_response(req, req->status, NULL, 0);
-
-	return (KORE_RESULT_OK);
-}
-
-// post /api/store
-int		post_store(struct http_request *req) {
-	req->status = HTTP_STATUS_INTERNAL_ERROR;
-
-	printf("call post_store by url /api/store \n");
-	
-	req->status = HTTP_STATUS_OK;
-
-//out:
-	http_response(req, req->status, NULL, 0);
-
-	return (KORE_RESULT_OK);
-}
-```
-
-## Tester
-```bash
-curl -i -k -X GET  https://127.0.0.1:8888/api/store
-curl -i -k -X POST -d '{"foo":{"bar": "Hello world"}}' https://127.0.0.1:8888/api/store
-```
-
-## Resultat
-```bash
-call stotes_list by url /api/store
-call post_store by url /api/store
-```
-
-# Exemple complet
-
-## routing
-```bash
-	route ^/api/store$ {
-		handler stores_list
-		methods get
-	}
-
-	route ^/api/store$ {
-		handler post_store
-		methods post
-	}
-
-	route ^/api/store$ {
-		handler put_store
-		methods put
-	}
-
-	route ^/api/store/[0-9]+$ {
-		handler delete_store
-		methods delete
-	}
-
-	route ^/api/store/[0-9]+$ {
-		handler get_store
-	}
-```
-
-## Code
-```C
-int		stores_list(struct http_request *);
-int		get_store(struct http_request *);
-int		extractApiStoreId(const char* path) ;
-
-int		post_store(struct http_request *);
-int		put_store(struct http_request *);
-int		delete_store(struct http_request *);
-
-// extract store_id from url /api/store/[0-9]+$/...
-int		extractApiStoreId(const char* path) {
-	int store_id = -1 ;
-	char *tofree = NULL ;
-	char *psz = strdup(path);
-	if ( NULL == psz ) {
-		return store_id ;
-	}
-	tofree = psz ;
-
-	char *pToken = NULL ;
-	pToken = strsep(&psz,"/") ; // first iteration cursor on api in /api/store/[0-9]+$
-	if ( pToken == NULL ) {
-		free(tofree);
-		printf("get_store error : pToken is null for first iteratio\n");
-		return store_id ;
-	}
-	pToken = strsep(&psz,"/") ; // second iteration cursor on store in /api/store/[0-9]+$
-	if ( pToken == NULL ) {
-		free(tofree);
-		printf("get_store error : pToken is null for second iteratio\n");
-		return store_id ;
-	}
-	pToken = strsep(&psz,"/") ; // third iteration cursor on id ([0-9]+ in /api/store/[0-9]+$
-	if ( pToken == NULL ) {
-		free(tofree);
-		printf("get_store error : pToken is null for third iteratio\n");
-		return store_id ;
-	}
-	pToken = strsep(&psz,"/") ; // 4iem iteration cursor on id ([0-9]+ in /api/store/[0-9]+$
-	if ( pToken == NULL ) {
-		free(tofree);
-		printf("get_store error : pToken is null for 4iem iteratio\n");
-		return store_id ;
-	}
-	store_id = atoi(pToken);
-	free(tofree);
-	return store_id ;
-}
-
-// get /api/store
-int		stores_list(struct http_request *req) {
-	req->status = HTTP_STATUS_INTERNAL_ERROR;
-
-	printf("call stotes_list by url /api/store \n");
-	
-	req->status = HTTP_STATUS_OK;
-
-//out:
-	http_response(req, req->status, NULL, 0);
-
-	return (KORE_RESULT_OK);
-}
-
-// post /api/store
-int		post_store(struct http_request *req) {
-	req->status = HTTP_STATUS_INTERNAL_ERROR;
-
-	printf("call post_store by url /api/store \n");
-	
-	req->status = HTTP_STATUS_OK;
-
-//out:
-	http_response(req, req->status, NULL, 0);
-
-	return (KORE_RESULT_OK);
-}
-
-// post /api/store
-int		put_store(struct http_request *req) {
-	req->status = HTTP_STATUS_INTERNAL_ERROR;
-
-	printf("call put_store by url /api/store \n");
-	
-	req->status = HTTP_STATUS_OK;
-
-//out:
-	http_response(req, req->status, NULL, 0);
-
-	return (KORE_RESULT_OK);
-}
-
-// /api/store/[0-9]+$ with [0-9]+ : (magasin_id)
-int		delete_store(struct http_request *req) {
-	req->status = HTTP_STATUS_INTERNAL_ERROR;
-
-	int store_id = extractApiStoreId(req->path);
-	if ( store_id <= 0 ) {
-		goto out;
-	}
-	
-	printf("call delete_store by url /api/store/[0-9]+ (%s) with id %d\n",req->path,store_id);
-	
-	req->status = HTTP_STATUS_OK;
-
-out:
-	http_response(req, req->status, NULL, 0);
-
-	return (KORE_RESULT_OK);
-}
-
-// /api/store/[0-9]+$ with [0-9]+ : (magasin_id)
-int		get_store(struct http_request *req) {
-	req->status = HTTP_STATUS_INTERNAL_ERROR;
-
-	int store_id = extractApiStoreId(req->path);
-	if ( store_id <= 0 ) {
-		goto out;
-	}
-	
-	printf("call get_store by url /api/store/[0-9]+ (%s) with id %d\n",req->path,store_id);
-	
-	req->status = HTTP_STATUS_OK;
-
-out:
-	http_response(req, req->status, NULL, 0);
-
-	return (KORE_RESULT_OK);
-}
-```
-
-## test
-```bash
-curl -i -k -X GET  https://127.0.0.1:8888/api/store
-curl -i -k -X POST -d '{"foo":{"bar": "Hello world"}}' https://127.0.0.1:8888/api/store
-curl -i -k -X PUT -d '{"foo":{"bar": "Hello world"}}' https://127.0.0.1:8888/api/store
-curl -i -k -X GET  https://127.0.0.1:8888/api/store/1234
-curl -i -k -X DELETE  https://127.0.0.1:8888/api/store/1234
-
-call stotes_list by url /api/store
-call post_store by url /api/store
-call put_store by url /api/store
-call get_store by url /api/store/[0-9]+ (/api/store/1234) with id 1234
-call delete_store by url /api/store/[0-9]+ (/api/store/1234) with id 1234
-```
-
-# Connection a la base postgres
-
-## Fonction init
-
-### Particularite Linux (seccomp) 
-
-Attention, il faut commencer par autoriser les syscall getdents getdents64 par un appel global.
-
-### Parametrage de la base dans la fonction init
-
-
-```C
-#include <kore/kore.h>
-#include <kore/http.h>
-#include <kore/pgsql.h>
-#include <kore/seccomp.h>
-
-int		init(int);
-int		page(struct http_request *);
-
-KORE_SECCOMP_FILTER("app",KORE_SYSCALL_ALLOW(getdents),KORE_SYSCALL_ALLOW(getdents64))
-
-int		init(int state) {
-	int ret ;
-	
-	ret = kore_pgsql_register("db","user=kore password=korepwd dbname=magasin host=10.1.1.24 sslmode=disable");
-	if ( ret == KORE_RESULT_OK ) {
-		printf("database postgres db is register\n");
-	} else {
-		printf("database postgres db is not register\n");
-	}
-	return ret;
-}
 ```
 

@@ -99,7 +99,7 @@ int        post_product(struct http_request *req) {
         kore_pgsql_logerror(&sql);
     }
     
-    http_response(req, 200, buf.data, buf.offset);
+    http_response(req, req->status, buf.data, buf.offset);
 
     kore_pgsql_cleanup(&sql);
     kore_buf_cleanup(&errors);
@@ -172,7 +172,7 @@ int        put_product(struct http_request *req) {
         kore_pgsql_logerror(&sql);
     }
     
-    http_response(req, 200, buf.data, buf.offset);
+    http_response(req, req->status, buf.data, buf.offset);
 
     kore_pgsql_cleanup(&sql);
     kore_buf_cleanup(&errors);
